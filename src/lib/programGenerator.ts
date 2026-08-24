@@ -214,11 +214,12 @@ export function generateProgram(params: GenerateParams): GenerateResult {
     }
     if (candidates.length === 0) continue
 
-    // Only offer exercises the user has "unlocked" in their progression chain.
+    // Offer exercises around the user's current progression level — one step
+    // easier or harder too, not just the exact level — for more variety.
     const unlocked = candidates.filter((ex) => {
       if (!ex.progressionGroup || ex.progressionLevel == null) return true
       const level = getCurrentLevel(ex.progressionGroup, progressionState, profile)
-      return ex.progressionLevel <= level
+      return ex.progressionLevel >= level - 1 && ex.progressionLevel <= level + 1
     })
     const pickPool = unlocked.length > 0 ? unlocked : candidates
 
@@ -230,16 +231,9 @@ export function generateProgram(params: GenerateParams): GenerateResult {
     const fresh = rotationCandidates.filter((ex) => !recentAllIds.has(ex.id))
     const finalPool = fresh.length > 0 ? fresh : rotationCandidates
 
-    let chosen: ExerciseDef
-    const chainCandidates = finalPool.filter((ex) => ex.progressionGroup)
-    if (chainCandidates.length > 0) {
-      // Within the chain, stay at the highest unlocked level (the "current" progression step).
-      const maxLevel = Math.max(...chainCandidates.map((e) => e.progressionLevel ?? 0))
-      const atLevel = chainCandidates.filter((e) => e.progressionLevel === maxLevel)
-      chosen = atLevel[Math.floor(Math.random() * atLevel.length)]
-    } else {
-      chosen = finalPool[Math.floor(Math.random() * finalPool.length)]
-    }
+    // Pick randomly across the whole unlocked window (not always the hardest
+    // unlocked step) so the same level doesn't dominate every session.
+    const chosen: ExerciseDef = finalPool[Math.floor(Math.random() * finalPool.length)]
 
     usedIds.add(chosen.id)
 
