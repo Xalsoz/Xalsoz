@@ -5,7 +5,7 @@ import { Card } from '../components/Card'
 import { ScreenShell } from '../components/ScreenShell'
 import { useAppData } from '../context/AppDataContext'
 import { useTrainingFlow } from '../context/TrainingFlowContext'
-import { generateProgram } from '../lib/programGenerator'
+import { generateProgram, regenerateExercise } from '../lib/programGenerator'
 import { ENERGY_LABELS, ENVIRONMENT_LABELS, UNIT_LABELS } from '../lib/labels'
 
 export function WorkoutProgram() {
@@ -62,6 +62,25 @@ export function WorkoutProgram() {
     )
   }
 
+  function swapExercise(index: number) {
+    if (!environment || !energyLevel || !program || !userProfile) return
+    const target = program.exercises[index]
+    const replacement = regenerateExercise({
+      muscleGroup: target.muscleGroup,
+      environment,
+      energyLevel,
+      profile: userProfile,
+      workoutLog,
+      programHistory,
+      progressionState,
+      excludeIds: program.exercises.map((e) => e.exerciseId),
+    })
+    if (!replacement) return
+    const exercises = [...program.exercises]
+    exercises[index] = replacement
+    setProgram({ ...program, exercises })
+  }
+
   return (
     <ScreenShell title="Твоя программа" onBack={() => navigate('/train/energy')}>
       <p className="mt-1 text-sm text-slate-400">
@@ -84,6 +103,13 @@ export function WorkoutProgram() {
               </div>
             </div>
             <p className="mt-2 text-sm text-slate-400">{ex.description}</p>
+            <button
+              type="button"
+              onClick={() => swapExercise(i)}
+              className="mt-3 text-xs font-medium text-emerald-400 active:text-emerald-300"
+            >
+              ⟲ Заменить
+            </button>
           </Card>
         ))}
       </div>

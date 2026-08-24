@@ -36,13 +36,28 @@ const ENERGY_DIFFICULTY_RANGE: Record<EnergyLevel, [number, number]> = {
 const ENERGY_SET_COUNT: Record<EnergyLevel, number> = {
   low: 2,
   medium: 3,
-  high: 3,
+  high: 4,
 }
 
 const ENERGY_INTENSITY_MULT: Record<EnergyLevel, number> = {
   low: 0.6,
   medium: 0.85,
   high: 1.05,
+}
+
+/**
+ * A harder variant of a tracked movement (e.g. pike/diamond/archer push-ups)
+ * realistically yields far fewer reps than the user's flat push-up/pull-up
+ * max, and an easier one (wall push-ups, dead hangs) yields more. Scale the
+ * rep target by how far the exercise's difficulty sits from the "standard"
+ * difficulty (3) for that chain, instead of reusing the raw max as-is.
+ */
+const DIFFICULTY_REP_FACTOR: Record<number, number> = {
+  1: 1.6,
+  2: 1.3,
+  3: 1.0,
+  4: 0.55,
+  5: 0.3,
 }
 
 const EXCLUDE_ON_LOW_ENERGY = new Set([
@@ -125,7 +140,7 @@ function computeSetsAndTarget(
         : profile.startingLevel.pushUps
     const currentMax = latestActualFor(exercise.tracks, log) ?? startVal
     const base = Math.max(currentMax, exercise.difficulty <= 2 ? 5 : 3)
-    const target = Math.max(3, Math.round(base * mult))
+    const target = Math.max(3, Math.round(base * mult * DIFFICULTY_REP_FACTOR[exercise.difficulty]))
     return { sets, target }
   }
 
@@ -171,12 +186,64 @@ const MUSCLE_GROUP_SLOTS: Array<{
   { muscleGroup: 'full-body', required: false },
 ]
 
+interface PickSlotParams {
+  muscleGroup: ExerciseDef['muscleGroup']
+  pool: ExerciseDef[]
+  energyLevel: EnergyLevel
+  excludeIds: Set<string>
+  lastExerciseIds: Set<string>
+  recentAllIds: Set<string>
+  progressionState: ProgressionState
+  profile: UserProfile
+}
+
+/** Candidate selection shared between generating a full program and swapping one slot. */
+function pickExerciseForSlot(params: PickSlotParams): ExerciseDef | null {
+  const { muscleGroup, pool, energyLevel, excludeIds, lastExerciseIds, recentAllIds, progressionState, profile } =
+    params
+  const [minDiff, maxDiff] = ENERGY_DIFFICULTY_RANGE[energyLevel]
+
+  let candidates = pool.filter(
+    (ex) =>
+      ex.muscleGroup === muscleGroup &&
+      ex.difficulty >= minDiff &&
+      ex.difficulty <= maxDiff &&
+      !excludeIds.has(ex.id) &&
+      !(energyLevel === 'low' && EXCLUDE_ON_LOW_ENERGY.has(ex.id)),
+  )
+
+  if (candidates.length === 0) {
+    candidates = pool.filter((ex) => ex.muscleGroup === muscleGroup && !excludeIds.has(ex.id))
+  }
+  if (candidates.length === 0) return null
+
+  // Offer exercises around the user's current progression level — one step
+  // easier or harder too, not just the exact level — for more variety.
+  const unlocked = candidates.filter((ex) => {
+    if (!ex.progressionGroup || ex.progressionLevel == null) return true
+    const level = getCurrentLevel(ex.progressionGroup, progressionState, profile)
+    return ex.progressionLevel >= level - 1 && ex.progressionLevel <= level + 1
+  })
+  const pickPool = unlocked.length > 0 ? unlocked : candidates
+
+  // Avoid repeating exactly last session's set for this environment+energy combo.
+  let rotationCandidates = pickPool.filter((ex) => !lastExerciseIds.has(ex.id))
+  if (rotationCandidates.length === 0) rotationCandidates = pickPool
+
+  // Prefer exercises not seen in the last 3 generated programs at all, for novelty.
+  const fresh = rotationCandidates.filter((ex) => !recentAllIds.has(ex.id))
+  const finalPool = fresh.length > 0 ? fresh : rotationCandidates
+
+  // Pick randomly across the whole unlocked window (not always the hardest
+  // unlocked step) so the same level doesn't dominate every session.
+  return finalPool[Math.floor(Math.random() * finalPool.length)]
+}
+
 export function generateProgram(params: GenerateParams): GenerateResult {
   const { environment, energyLevel, profile, workoutLog, programHistory, progressionState } =
     params
 
   const pool = getExercisesForEnvironment(environment)
-  const [minDiff, maxDiff] = ENERGY_DIFFICULTY_RANGE[energyLevel]
   const key = comboKey(environment, energyLevel)
 
   const recentRecords = programHistory
@@ -193,47 +260,22 @@ export function generateProgram(params: GenerateParams): GenerateResult {
     if (selected.length >= 6) break
 
     if (slot.muscleGroup === 'full-body') {
-      if (energyLevel === 'low' || selected.length >= 5 || Math.random() < 0.4) {
-        continue
-      }
+      if (energyLevel === 'low' || selected.length >= 5) continue
+      const skipChance = energyLevel === 'high' ? 0.15 : 0.5
+      if (Math.random() < skipChance) continue
     }
 
-    let candidates = pool.filter(
-      (ex) =>
-        ex.muscleGroup === slot.muscleGroup &&
-        ex.difficulty >= minDiff &&
-        ex.difficulty <= maxDiff &&
-        !usedIds.has(ex.id) &&
-        !(energyLevel === 'low' && EXCLUDE_ON_LOW_ENERGY.has(ex.id)),
-    )
-
-    if (candidates.length === 0) {
-      candidates = pool.filter(
-        (ex) => ex.muscleGroup === slot.muscleGroup && !usedIds.has(ex.id),
-      )
-    }
-    if (candidates.length === 0) continue
-
-    // Offer exercises around the user's current progression level — one step
-    // easier or harder too, not just the exact level — for more variety.
-    const unlocked = candidates.filter((ex) => {
-      if (!ex.progressionGroup || ex.progressionLevel == null) return true
-      const level = getCurrentLevel(ex.progressionGroup, progressionState, profile)
-      return ex.progressionLevel >= level - 1 && ex.progressionLevel <= level + 1
+    const chosen = pickExerciseForSlot({
+      muscleGroup: slot.muscleGroup,
+      pool,
+      energyLevel,
+      excludeIds: usedIds,
+      lastExerciseIds,
+      recentAllIds,
+      progressionState,
+      profile,
     })
-    const pickPool = unlocked.length > 0 ? unlocked : candidates
-
-    // Avoid repeating exactly last session's set for this environment+energy combo.
-    let rotationCandidates = pickPool.filter((ex) => !lastExerciseIds.has(ex.id))
-    if (rotationCandidates.length === 0) rotationCandidates = pickPool
-
-    // Prefer exercises not seen in the last 3 generated programs at all, for novelty.
-    const fresh = rotationCandidates.filter((ex) => !recentAllIds.has(ex.id))
-    const finalPool = fresh.length > 0 ? fresh : rotationCandidates
-
-    // Pick randomly across the whole unlocked window (not always the hardest
-    // unlocked step) so the same level doesn't dominate every session.
-    const chosen: ExerciseDef = finalPool[Math.floor(Math.random() * finalPool.length)]
+    if (!chosen) continue
 
     usedIds.add(chosen.id)
 
@@ -300,5 +342,61 @@ export function generateProgram(params: GenerateParams): GenerateResult {
   return {
     program: { comboKey: key, exercises: shuffle(selected) },
     nextProgressionState,
+  }
+}
+
+interface RegenerateExerciseParams {
+  muscleGroup: ExerciseDef['muscleGroup']
+  environment: Environment
+  energyLevel: EnergyLevel
+  profile: UserProfile
+  workoutLog: WorkoutLogEntry[]
+  programHistory: GeneratedProgramRecord[]
+  progressionState: ProgressionState
+  /** Exercise ids already in the current program, so the swap can't pick a duplicate. */
+  excludeIds: string[]
+}
+
+/** Swap out a single slot in an already-generated program for a different exercise. */
+export function regenerateExercise(params: RegenerateExerciseParams): GeneratedExercise | null {
+  const { muscleGroup, environment, energyLevel, profile, workoutLog, programHistory, progressionState, excludeIds } =
+    params
+
+  const pool = getExercisesForEnvironment(environment)
+  const key = comboKey(environment, energyLevel)
+  const recentRecords = programHistory.filter((r) => r.comboKey === key)
+  const recentAllIds = new Set(recentRecords.flatMap((r) => r.exerciseIds))
+  const excludeSet = new Set(excludeIds)
+
+  const chosen = pickExerciseForSlot({
+    muscleGroup,
+    pool,
+    energyLevel,
+    excludeIds: excludeSet,
+    lastExerciseIds: excludeSet,
+    recentAllIds,
+    progressionState,
+    profile,
+  })
+  if (!chosen) return null
+
+  let variant: string | undefined
+  if (chosen.variants && chosen.variants.length > 0) {
+    const timesSeen = recentRecords.filter((r) => r.exerciseIds.includes(chosen.id)).length
+    variant = chosen.variants[timesSeen % chosen.variants.length]
+  }
+
+  const { sets, target } = computeSetsAndTarget(chosen, energyLevel, workoutLog, profile)
+
+  return {
+    exerciseId: chosen.id,
+    name: chosen.name,
+    muscleGroup: chosen.muscleGroup,
+    unit: chosen.unit,
+    sets,
+    target,
+    variant,
+    description: chosen.description,
+    tracks: chosen.tracks,
   }
 }
