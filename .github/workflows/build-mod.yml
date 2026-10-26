@@ -13,6 +13,38 @@ permissions:
   contents: write
 
 jobs:
+  # Ядра мода (без игры) собираются и проходят тесты компилятором MSVC: те же, что собирает мод.
+  # Ошибки выводятся как аннотации, их видно без скачивания логов.
+  core-msvc:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build and run core tests (MSVC)
+        shell: pwsh
+        working-directory: probe
+        run: |
+          $failed = $false
+          $targets = @(
+            @("test_core", @("tests/test_core.cpp", "src/core/probe_core.cpp")),
+            @("test_solve", @("tests/test_solve.cpp", "src/core/solve_core.cpp", "src/core/probe_core.cpp")),
+            @("test_difficulty", @("tests/test_difficulty.cpp", "src/core/difficulty.cpp")),
+            @("test_macro_io", @("tests/test_macro_io.cpp", "src/core/macro_io.cpp", "src/core/probe_core.cpp", "src/core/solve_core.cpp"))
+          )
+          foreach ($t in $targets) {
+            $name = $t[0]
+            $out = & cl /nologo /std:c++20 /EHsc /W3 /utf-8 /O2 /I src "/Fe:$name.exe" "/Fo:$name-" $t[1] 2>&1
+            if ($LASTEXITCODE -ne 0) {
+              $failed = $true
+              foreach ($line in $out) { if ("$line" -match "error|warning") { Write-Host "::error::$name $line" } }
+              continue
+            }
+            $run = & ".\$name.exe" 2>&1
+            Write-Host "$name : $run"
+            if ($LASTEXITCODE -ne 0) { $failed = $true; Write-Host "::error::$name tests failed: $run" }
+          }
+          if ($failed) { exit 1 }
+
   build:
     runs-on: windows-latest
     steps:

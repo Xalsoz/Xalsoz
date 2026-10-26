@@ -4,7 +4,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
-#include <map>
+#include <initializer_list>
 #include <memory>
 
 namespace probe {
@@ -77,7 +77,9 @@ struct Json {
     double n = 0;
     std::string s;
     std::vector<Json> arr;
-    std::map<std::string, Json> obj;
+    // Объект: ключи и значения в параллельных векторах (std::map от неполного типа не везде собирается).
+    std::vector<std::string> keys;
+    std::vector<Json> vals;
 };
 
 struct JsonParser {
@@ -135,7 +137,9 @@ struct JsonParser {
                 ws();
                 if (i >= t.size() || t[i] != ':') return fail("expected ':'");
                 ++i;
-                if (!parse(v.obj[key], depth + 1)) return false;
+                v.keys.push_back(key);
+                v.vals.emplace_back();
+                if (!parse(v.vals.back(), depth + 1)) return false;
                 ws();
                 if (i < t.size() && t[i] == ',') {
                     ++i;
@@ -182,8 +186,8 @@ struct JsonParser {
 const Json* field(const Json& o, std::initializer_list<const char*> keys) {
     if (o.type != Json::Type::Obj) return nullptr;
     for (const char* k : keys) {
-        auto it = o.obj.find(k);
-        if (it != o.obj.end()) return &it->second;
+        for (size_t i = 0; i < o.keys.size(); ++i)
+            if (o.keys[i] == k) return &o.vals[i];
     }
     return nullptr;
 }
