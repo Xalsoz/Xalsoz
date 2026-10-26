@@ -611,7 +611,7 @@ void uiStart(bool solve) {
         auto files = listMacros();
         bool ok = false;
         if (!files.empty()) {
-            ok = loadMacroPath(s, files[std::min(macroIndex(), files.size() - 1)], problem);
+            ok = loadMacroPath(s, files[macroIndex() < files.size() ? macroIndex() : files.size() - 1], problem);
         } else {
             ok = loadMacroFile(s, problem);  // запасной вариант: probe_input.txt
             if (!ok) problem = "No macros found. Put .gdr2 / .gdr.json files into:\n" + macrosDir().string();
@@ -680,15 +680,15 @@ protected:
         addButton("Measure macro", 200.f, menu_selector(GddiffPopup::onMeasure));
         addButton("Stop", 328.f, menu_selector(GddiffPopup::onStopRun));
 
-        auto small = [&](char const* text, float x, SEL_MenuHandler handler, int width) {
+        auto addSmall = [&](char const* text, float x, SEL_MenuHandler handler, int width) {
             auto spr = ButtonSprite::create(text, width, true, "bigFont.fnt", "GJ_button_04.png", 24.f, .4f);
             auto btn = CCMenuItemSpriteExtra::create(spr, this, handler);
             btn->setPosition({x, 198.f});
             menu->addChild(btn);
         };
-        small("<", 28.f, menu_selector(GddiffPopup::onPrevMacro), 22);
-        small(">", 56.f, menu_selector(GddiffPopup::onNextMacro), 22);
-        small("Open macros folder", 330.f, menu_selector(GddiffPopup::onOpenFolder), 120);
+        addSmall("<", 28.f, menu_selector(GddiffPopup::onPrevMacro), 22);
+        addSmall(">", 56.f, menu_selector(GddiffPopup::onNextMacro), 22);
+        addSmall("Open macros folder", 330.f, menu_selector(GddiffPopup::onOpenFolder), 120);
         m_macroLabel = CCLabelBMFont::create("", "chatFont.fnt");
         m_macroLabel->setAnchorPoint({0.f, 0.5f});
         m_macroLabel->setPosition({76.f, 198.f});
