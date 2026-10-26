@@ -145,6 +145,12 @@
                 "progress"
             ]
         },
+        "replay-test": {
+            "type": "bool",
+            "name": "Replay test instead of measuring",
+            "description": "Measure macro plays the macro once and saves where the player was on every tick (trace_<id>.csv). For finding why a macro dies.",
+            "default": false
+        },
         "frame-offset": {
             "type": "int",
             "name": "Tick offset",

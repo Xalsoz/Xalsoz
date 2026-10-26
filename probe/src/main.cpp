@@ -61,10 +61,19 @@ struct Fingerprint {
     PlayerPrint p2;
 };
 
-enum class Phase { None, Solving, Measuring };
+enum class Phase { None, Solving, Measuring, Replay };
+
+// Строка трассы для проверки воспроизведения: где игрок был на каждом тике.
+struct TraceRow {
+    int64_t tick = 0;
+    float v[6] = {0, 0, 0, 0, 0, 0};  // x, y, поворот игрока 1; x, y, поворот игрока 2
+    bool died = false;
+};
 
 struct Session {
     std::vector<probe::Input> macro;
+    size_t replayIdx = 0;
+    std::vector<TraceRow> trace;
     probe::Config config;
     probe::SolveConfig solveConfig;
     std::unique_ptr<probe::Controller> controller;
@@ -394,6 +403,69 @@ void startMeasure(PlayLayer* pl) {
     pl->resetLevel();
 }
 
+constexpr size_t kTraceLimit = 5000;
+
+void startReplay(PlayLayer* pl) {
+    auto& s = session();
+    s.phase = Phase::Replay;
+    s.replayIdx = 0;
+    s.trace.clear();
+    beginPractice(pl);
+    notify("gddiff: replaying the macro once (trace of positions)");
+    pl->resetLevel();
+}
+
+void finishReplay(PlayLayer* pl, std::string const& reason) {
+    auto& s = session();
+    if (s.phase != Phase::Replay) return;
+    s.phase = Phase::None;
+    releaseButtons(pl);
+    std::error_code ec;
+    std::filesystem::create_directories(saveDir(), ec);
+    auto path = saveDir() / ("trace_" + std::to_string(s.levelID) + ".csv");
+    {
+        std::ofstream out(path);
+        out << "# gddiff trace: " << reason << " macro=" << s.macroName << " source=" << (s.levelTimeSource ? "time" : "progress")
+            << " offset=" << s.frameOffset << "\n";
+        out << "tick,p1x,p1y,p1rot,p2x,p2y,p2rot,died\n";
+        out.setf(std::ios::fixed);
+        out.precision(4);
+        for (auto const& r : s.trace) {
+            out << r.tick;
+            for (float v : r.v) out << ',' << v;
+            out << ',' << (r.died ? 1 : 0) << "\n";
+        }
+    }
+    log::info("gddiff replay: {} ({} ticks)", reason, s.trace.size());
+    lastRun().lines = {"Replay: " + reason, "Trace: " + path.filename().string()};
+    alert("Replay finished: " + reason + "\nFile: " + path.filename().string());
+}
+
+void replayTick(PlayLayer* pl) {
+    auto& s = session();
+    const int64_t tick = currentTick(pl);
+    const bool died = s.died;
+    s.died = false;
+    if (tick == s.lastTick && !died) return;  // полутики 2.2081: один вызов на тик
+    s.lastTick = tick;
+    TraceRow row;
+    row.tick = tick;
+    row.died = died;
+    auto fill = [&](PlayerObject* p, float* v) {
+        if (!p) return;
+        v[0] = p->getPositionX();
+        v[1] = p->getPositionY();
+        v[2] = p->getRotation();
+    };
+    fill(pl->m_player1, row.v);
+    fill(pl->m_player2, row.v + 3);
+    if (s.trace.size() < kTraceLimit) s.trace.push_back(row);
+    if (died) return finishReplay(pl, "died at tick " + std::to_string(tick));
+    if (pl->m_levelEndAnimationStarted) return finishReplay(pl, "level completed at tick " + std::to_string(tick));
+    if (s.trace.size() >= kTraceLimit) return finishReplay(pl, "still alive after " + std::to_string(kTraceLimit) + " ticks");
+    while (s.replayIdx < s.macro.size() && s.macro[s.replayIdx].frame <= tick) press(pl, s.macro[s.replayIdx++]);
+}
+
 void startSolve(PlayLayer* pl) {
     auto& s = session();
     s.solver = std::make_unique<probe::Solver>(s.solveConfig);
@@ -463,6 +535,8 @@ void stopRun(PlayLayer* pl, std::string const& reason) {
         }
     } else if (s.phase == Phase::Measuring) {
         finishMeasure(pl, reason);
+    } else if (s.phase == Phase::Replay) {
+        finishReplay(pl, reason);
     }
 }
 
@@ -580,6 +654,7 @@ void afterCommands(GJBaseGameLayer* layer) {
         }
         return;
     }
+    if (s.phase == Phase::Replay) return replayTick(pl);
     if (!s.running()) return;
     int64_t tick = currentTick(pl);
     bool died = s.died;
@@ -637,6 +712,8 @@ void uiStart(bool solve) {
     resumeGame(pl);
     if (solve) {
         startSolve(pl);
+    } else if (Mod::get()->getSettingValue<bool>("replay-test")) {
+        startReplay(pl);
     } else {
         startMeasure(pl);
     }
@@ -657,6 +734,9 @@ std::vector<std::string> statusLines() {
         lines.push_back(s.solver->progressText());
         if (s.solver->tickRebases() > 0)
             lines.push_back("Tick counter shifted after " + std::to_string(s.solver->tickRebases()) + " restores");
+    } else if (s.phase == Phase::Replay) {
+        lines.push_back("Replaying the macro once, recording positions...");
+        lines.push_back(std::to_string(s.trace.size()) + " ticks recorded");
     } else if (s.phase == Phase::Measuring && s.controller) {
         lines.push_back("Measuring click windows...");
         lines.push_back(s.controller->progressText());
