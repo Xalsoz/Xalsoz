@@ -68,6 +68,8 @@ struct TraceRow {
     int64_t tick = 0;
     float v[6] = {0, 0, 0, 0, 0, 0};  // x, y, поворот игрока 1; x, y, поворот игрока 2
     bool died = false;
+    int64_t progress = 0;   // m_currentProgress: целый счётчик шагов физики
+    double levelTicks = 0;  // m_levelTime * 240 без округления
 };
 
 struct Session {
@@ -94,6 +96,7 @@ struct Session {
     std::string levelName;
     std::string macroName;
     std::string macroNote;
+    std::string macroBot;  // имя бота из файла макроса
     int64_t notifiedAt = 0;
     int64_t repairs = 0;
     std::vector<Fingerprint> prints;  // по одному на каждый чекпоинт мода (стек)
@@ -212,8 +215,27 @@ void loadSettings(Session& s) {
     s.repairRestore = mod->getSettingValue<bool>("repair-restore");
     s.speed = static_cast<float>(mod->getSettingValue<double>("speed"));
     s.sigmaMs = mod->getSettingValue<double>("sigma-ms");
-    s.levelTimeSource = mod->getSettingValue<std::string>("frame-source") != "progress";
+    s.levelTimeSource = mod->getSettingValue<std::string>("frame-source") != "progress";  // auto уточняется после чтения макроса
     s.frameOffset = mod->getSettingValue<int64_t>("frame-offset");
+}
+
+// Источник номера тика. Макросы xdBot записаны по времени уровня, макросы остальных ботов по целому
+// счётчику шагов (так их и проигрывает сам xdBot). Режим auto выбирает по имени бота в файле.
+void applyFrameSource(Session& s) {
+    auto mode = Mod::get()->getSettingValue<std::string>("frame-source");
+    if (mode == "progress") {
+        s.levelTimeSource = false;
+    } else if (mode == "level-time") {
+        s.levelTimeSource = true;
+    } else {
+        std::string bot = s.macroBot;
+        std::transform(bot.begin(), bot.end(), bot.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        s.levelTimeSource = bot.empty() || bot.find("xdbot") != std::string::npos;
+        if (!bot.empty()) {
+            if (!s.macroNote.empty()) s.macroNote += "; ";
+            s.macroNote += std::string("tick source: ") + (s.levelTimeSource ? "level time" : "step counter") + " (macro by " + s.macroBot + ")";
+        }
+    }
 }
 
 bool loadMacroFile(Session& s, std::string& problem) {
@@ -283,6 +305,8 @@ bool loadMacroPath(Session& s, std::filesystem::path const& path, std::string& p
     }
     s.macroNote = info.note;
     s.macroName = path.filename().string();
+    s.macroBot = info.bot;
+    applyFrameSource(s);
     return true;
 }
 
@@ -427,13 +451,13 @@ void finishReplay(PlayLayer* pl, std::string const& reason) {
         std::ofstream out(path);
         out << "# gddiff trace: " << reason << " macro=" << s.macroName << " source=" << (s.levelTimeSource ? "time" : "progress")
             << " offset=" << s.frameOffset << "\n";
-        out << "tick,p1x,p1y,p1rot,p2x,p2y,p2rot,died\n";
+        out << "tick,p1x,p1y,p1rot,p2x,p2y,p2rot,died,progress,leveltime240\n";
         out.setf(std::ios::fixed);
         out.precision(4);
         for (auto const& r : s.trace) {
             out << r.tick;
             for (float v : r.v) out << ',' << v;
-            out << ',' << (r.died ? 1 : 0) << "\n";
+            out << ',' << (r.died ? 1 : 0) << ',' << r.progress << ',' << r.levelTicks << "\n";
         }
     }
     log::info("gddiff replay: {} ({} ticks)", reason, s.trace.size());
@@ -451,6 +475,8 @@ void replayTick(PlayLayer* pl) {
     TraceRow row;
     row.tick = tick;
     row.died = died;
+    row.progress = static_cast<int64_t>(pl->m_gameState.m_currentProgress);
+    row.levelTicks = pl->m_gameState.m_levelTime * 240.0;
     auto fill = [&](PlayerObject* p, float* v) {
         if (!p) return;
         v[0] = p->getPositionX();

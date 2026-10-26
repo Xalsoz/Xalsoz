@@ -138,9 +138,10 @@
         "frame-source": {
             "type": "string",
             "name": "Tick source",
-            "description": "level-time matches xdBot macros, progress matches other bots.",
-            "default": "level-time",
+            "description": "auto: xdBot macros use level time, macros of other bots use the step counter (like xdBot itself).",
+            "default": "auto",
             "one-of": [
+                "auto",
                 "level-time",
                 "progress"
             ]
