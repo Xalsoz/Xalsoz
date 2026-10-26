@@ -21,7 +21,7 @@ Python 3.10+, numpy, scipy, pandas. Для тестов ядра нужен ко
 
 ## Основной путь: окна, измеренные в игре
 
-1. **Подготовь макрос.** Нужен макрос xdBot, MH Replay или другого бота формата GDR (`.gdr.json` или `.gdr2`), который проходит уровень.
+1. **Подготовь макрос.** Нужен макрос xdBot, MH Replay или другого бота формата GDR (`.gdr2`, `.gdr`, `.gdr.json`, `.json` или `.xd`), который проходит уровень.
    ```bash
    python -m gddiff probe-prepare --macro my_level.gdr.json --out probe_input.txt
    ```

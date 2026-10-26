@@ -2,6 +2,8 @@
 
 Поддерживаются:
 - GDR JSON (.gdr.json, .json): экспорт xdBot, MH Replay и других ботов формата GDR;
+- GDR 1 (.gdr): тот же JSON, упакованный в MessagePack (читается встроенным разбором, без внешних библиотек);
+- xdBot .xd: первая строка частота или "android", дальше "кадр|нажато|кнопка|игрок2|только_позиция|...";
 - бинарный GDR 2 (.gdr2, файл начинается с байтов "GDR"): формат maxnut/GDReplayFormat,
   разбор по его заголовкам gdr.hpp и binarystream.hpp (платформерные макросы не читаются);
 - текстовый формат: строки "<кадр> <1|0> [<игрок 2: 1|0>]" и необязательная строка "fps=240".
@@ -256,14 +258,120 @@ def to_gdr2(macro: Macro, author: str = "", tag: str = "") -> bytes:
     return bytes(out)
 
 
+def _msgpack(data: bytes, name: str):
+    """Минимальный разбор MessagePack: числа, строки, bin, массивы, словари, nil и bool."""
+    pos = 0
+
+    def take(n: int) -> bytes:
+        nonlocal pos
+        if n < 0 or pos + n > len(data):
+            raise ValueError(f"{name}: файл MessagePack оборван (позиция {pos})")
+        out = data[pos : pos + n]
+        pos += n
+        return out
+
+    def value(depth: int = 0):
+        if depth > 64:
+            raise ValueError(f"{name}: слишком глубокая вложенность MessagePack")
+        t = take(1)[0]
+        if t <= 0x7F:
+            return t
+        if t >= 0xE0:
+            return t - 256
+        if 0xA0 <= t <= 0xBF:
+            return take(t & 0x1F).decode("utf-8", errors="replace")
+        if 0x90 <= t <= 0x9F:
+            return [value(depth + 1) for _ in range(t & 0x0F)]
+        if 0x80 <= t <= 0x8F:
+            return {value(depth + 1): value(depth + 1) for _ in range(t & 0x0F)}
+        fixed = {
+            0xCC: ">B", 0xCD: ">H", 0xCE: ">I", 0xCF: ">Q",
+            0xD0: ">b", 0xD1: ">h", 0xD2: ">i", 0xD3: ">q",
+            0xCA: ">f", 0xCB: ">d",
+        }
+        if t in fixed:
+            fmt = fixed[t]
+            return struct.unpack(fmt, take(struct.calcsize(fmt)))[0]
+        if t == 0xC0:
+            return None
+        if t in (0xC2, 0xC3):
+            return t == 0xC3
+        lens = {0xD9: 1, 0xC4: 1, 0xDA: 2, 0xC5: 2, 0xDB: 4, 0xC6: 4}
+        if t in lens:
+            n = int.from_bytes(take(lens[t]), "big")
+            raw = take(n)
+            return raw.decode("utf-8", errors="replace") if t in (0xD9, 0xDA, 0xDB) else raw
+        if t in (0xDC, 0xDD):
+            n = int.from_bytes(take(2 if t == 0xDC else 4), "big")
+            if n > len(data):
+                raise ValueError(f"{name}: неверный размер массива MessagePack")
+            return [value(depth + 1) for _ in range(n)]
+        if t in (0xDE, 0xDF):
+            n = int.from_bytes(take(2 if t == 0xDE else 4), "big")
+            if n > len(data):
+                raise ValueError(f"{name}: неверный размер словаря MessagePack")
+            return {value(depth + 1): value(depth + 1) for _ in range(n)}
+        raise ValueError(f"{name}: неподдерживаемый тип MessagePack 0x{t:02x}")
+
+    return value()
+
+
+def parse_gdr1(raw: bytes, source: str | None = None) -> Macro:
+    """GDR 1 (.gdr): MessagePack с теми же полями, что у GDR JSON."""
+    obj = _msgpack(raw, source or "макрос")
+    if not isinstance(obj, dict):
+        raise ValueError(f"{source or 'макрос'}: в MessagePack ожидался словарь")
+    return parse_gdr_json(obj, source)
+
+
+def parse_xd(text: str, source: str | None = None) -> Macro:
+    """xdBot .xd (по Macro::XDtoGDR из xdBot); строки с позициями пропускаются."""
+    name = source or "макрос"
+    mult = 1.0
+    fps = float(TPS)
+    inputs = []
+    for line_no, line in enumerate(text.splitlines(), 1):
+        line = line.strip()
+        if not line:
+            continue
+        f = line.split("|")
+        if len(f) < 4:
+            if f[0] == "android":
+                mult, fps = 4.0, 60.0
+            else:
+                try:
+                    fps = float(f[0])
+                except ValueError:
+                    raise ValueError(f"{name}: строка {line_no}: неверная частота кадров") from None
+                if fps <= 0:
+                    raise ValueError(f"{name}: строка {line_no}: неверная частота кадров")
+                mult = TPS / fps
+            continue
+        if len(f) < 5:
+            raise ValueError(f"{name}: строка {line_no}: мало полей")
+        try:
+            frame = float(f[0])
+        except ValueError:
+            raise ValueError(f"{name}: строка {line_no}: неверный кадр") from None
+        if f[4] == "1" or int(f[2] or 0) != JUMP_BUTTON:
+            continue
+        inputs.append(Input(frame=int(round(frame * mult)), down=f[1] == "1", player2=f[3] == "1"))
+    inputs.sort(key=lambda i: (i.frame, i.player2))
+    return Macro(inputs=inputs, fps=float(TPS), bot="xdBot (.xd)", source=source)
+
+
 def load_macro(path: str | Path) -> Macro:
     path = Path(path)
     raw = path.read_bytes()
     if raw[:3] == b"GDR":
         return parse_gdr2(raw, str(path))
+    if raw[:1] and (0x80 <= raw[0] <= 0x8F or raw[0] in (0xDE, 0xDF)):
+        return parse_gdr1(raw, str(path))
     text = raw.decode("utf-8-sig")
     if text.lstrip().startswith("{"):
         return parse_gdr_json(json.loads(text), str(path))
+    if "|" in text:
+        return parse_xd(text, str(path))
     return parse_plaintext(text, str(path))
 
 

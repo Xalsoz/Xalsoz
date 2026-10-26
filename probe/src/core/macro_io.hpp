@@ -1,5 +1,5 @@
-// Чтение макросов ботов прямо в моде, без Python: бинарный GDR 2 (.gdr2),
-// GDR JSON (.gdr.json, .json) и текстовый формат мода. Не зависит от игры.
+// Чтение макросов ботов прямо в моде, без Python: бинарный GDR 2 (.gdr2), GDR 1 (.gdr, MessagePack),
+// GDR JSON (.gdr.json, .json), xdBot .xd и текстовый формат мода. Не зависит от игры.
 //
 // GDR 2 разобран по gdr.hpp и binarystream.hpp из maxnut/GDReplayFormat; тот же
 // разбор в Python (gddiff/io/macro.py), оба проверены на файле, записанном
@@ -29,5 +29,9 @@ std::vector<Input> parseMacroBytes(const std::vector<uint8_t>& bytes, MacroInfo*
 
 std::vector<Input> parseGdr2(const std::vector<uint8_t>& bytes, MacroInfo* info, std::string* error);
 std::vector<Input> parseGdrJson(const std::string& text, MacroInfo* info, std::string* error);
+// GDR 1 (.gdr из xdBot и других): тот же JSON, упакованный в MessagePack.
+std::vector<Input> parseGdr1(const std::vector<uint8_t>& bytes, MacroInfo* info, std::string* error);
+// xdBot .xd (текст с разделителем '|').
+std::vector<Input> parseXd(const std::string& text, MacroInfo* info, std::string* error);
 
 }  // namespace probe

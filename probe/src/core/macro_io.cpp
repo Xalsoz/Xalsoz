@@ -276,14 +276,13 @@ std::vector<Input> parseGdr2(const std::vector<uint8_t>& bytes, MacroInfo* info,
     return macro;
 }
 
-std::vector<Input> parseGdrJson(const std::string& text, MacroInfo* info, std::string* error) {
+namespace {
+
+std::vector<Input> macroFromValue(const Json& root, MacroInfo* info, std::string* error) {
     auto err = [&](const std::string& m) {
         if (error) *error = m;
         return std::vector<Input>{};
     };
-    Json root;
-    JsonParser p{text, 0, {}};
-    if (!p.parse(root)) return err("bad JSON: " + p.err);
     const Json* inputs = field(root, {"inputs"});
     if (!inputs || inputs->type != Json::Type::Arr) return err("JSON has no inputs list");
     std::vector<Input> macro;
@@ -321,12 +320,201 @@ std::vector<Input> parseGdrJson(const std::string& text, MacroInfo* info, std::s
     return macro;
 }
 
+// ------------------------------------------------------------------ MessagePack (GDR 1, .gdr)
+// Нужное подмножество: nil, bool, целые, float, строки, bin, массивы, словари. Расширения (ext) пропускаются.
+
+struct MsgPack {
+    const std::vector<uint8_t>& d;
+    size_t i = 0;
+    std::string err;
+
+    bool fail(const char* m) {
+        if (err.empty()) err = std::string(m) + " at " + std::to_string(i);
+        return false;
+    }
+    bool need(size_t n) { return n <= d.size() - i || fail("unexpected end"); }
+    uint64_t be(int n) {
+        uint64_t v = 0;
+        for (int k = 0; k < n; ++k) v = (v << 8) | d[i + k];
+        i += n;
+        return v;
+    }
+    bool str(size_t n, Json& v) {
+        if (!need(n)) return false;
+        v.type = Json::Type::Str;
+        v.s.assign(reinterpret_cast<const char*>(d.data() + i), n);
+        i += n;
+        return true;
+    }
+    bool arr(size_t n, Json& v, int depth) {
+        v.type = Json::Type::Arr;
+        if (n > d.size() - i) return fail("bad array size");
+        v.arr.resize(n);
+        for (size_t k = 0; k < n; ++k)
+            if (!parse(v.arr[k], depth + 1)) return false;
+        return true;
+    }
+    bool map(size_t n, Json& v, int depth) {
+        v.type = Json::Type::Obj;
+        if (n > d.size() - i) return fail("bad map size");
+        v.keys.resize(n);
+        v.vals.resize(n);
+        for (size_t k = 0; k < n; ++k) {
+            Json key;
+            if (!parse(key, depth + 1)) return false;
+            if (key.type != Json::Type::Str) return fail("non-string map key");
+            v.keys[k] = key.s;
+            if (!parse(v.vals[k], depth + 1)) return false;
+        }
+        return true;
+    }
+    bool num(Json& v, double x) {
+        v.type = Json::Type::Num;
+        v.n = x;
+        return true;
+    }
+    bool parse(Json& v, int depth = 0) {
+        if (depth > 64) return fail("too deep");
+        if (!need(1)) return false;
+        const uint8_t t = d[i++];
+        if (t <= 0x7f) return num(v, t);
+        if (t >= 0xe0) return num(v, static_cast<int8_t>(t));
+        if (t >= 0xa0 && t <= 0xbf) return str(t & 0x1f, v);
+        if (t >= 0x90 && t <= 0x9f) return arr(t & 0x0f, v, depth);
+        if (t >= 0x80 && t <= 0x8f) return map(t & 0x0f, v, depth);
+        switch (t) {
+            case 0xc0: v.type = Json::Type::Null; return true;
+            case 0xc2: v.type = Json::Type::Bool; v.b = false; return true;
+            case 0xc3: v.type = Json::Type::Bool; v.b = true; return true;
+            case 0xca: {
+                if (!need(4)) return false;
+                uint32_t u = static_cast<uint32_t>(be(4));
+                float f;
+                std::memcpy(&f, &u, 4);
+                return num(v, f);
+            }
+            case 0xcb: {
+                if (!need(8)) return false;
+                uint64_t u = be(8);
+                double f;
+                std::memcpy(&f, &u, 8);
+                return num(v, f);
+            }
+            case 0xcc: if (!need(1)) return false; return num(v, static_cast<double>(be(1)));
+            case 0xcd: if (!need(2)) return false; return num(v, static_cast<double>(be(2)));
+            case 0xce: if (!need(4)) return false; return num(v, static_cast<double>(be(4)));
+            case 0xcf: if (!need(8)) return false; return num(v, static_cast<double>(be(8)));
+            case 0xd0: if (!need(1)) return false; return num(v, static_cast<int8_t>(be(1)));
+            case 0xd1: if (!need(2)) return false; return num(v, static_cast<int16_t>(be(2)));
+            case 0xd2: if (!need(4)) return false; return num(v, static_cast<int32_t>(be(4)));
+            case 0xd3: if (!need(8)) return false; return num(v, static_cast<double>(static_cast<int64_t>(be(8))));
+            case 0xd9: case 0xc4: { if (!need(1)) return false; size_t n = be(1); return str(n, v); }
+            case 0xda: case 0xc5: { if (!need(2)) return false; size_t n = be(2); return str(n, v); }
+            case 0xdb: case 0xc6: { if (!need(4)) return false; size_t n = be(4); return str(n, v); }
+            case 0xdc: if (!need(2)) return false; return arr(be(2), v, depth);
+            case 0xdd: if (!need(4)) return false; return arr(be(4), v, depth);
+            case 0xde: if (!need(2)) return false; return map(be(2), v, depth);
+            case 0xdf: if (!need(4)) return false; return map(be(4), v, depth);
+            default: return fail("unsupported MessagePack type");
+        }
+    }
+};
+
+}  // namespace
+
+std::vector<Input> parseGdrJson(const std::string& text, MacroInfo* info, std::string* error) {
+    Json root;
+    JsonParser p{text, 0, {}};
+    if (!p.parse(root)) {
+        if (error) *error = "bad JSON: " + p.err;
+        return {};
+    }
+    return macroFromValue(root, info, error);
+}
+
+std::vector<Input> parseGdr1(const std::vector<uint8_t>& bytes, MacroInfo* info, std::string* error) {
+    Json root;
+    MsgPack p{bytes, 0, {}};
+    if (!p.parse(root)) {
+        if (error) *error = "bad MessagePack (GDR 1): " + p.err;
+        return {};
+    }
+    return macroFromValue(root, info, error);
+}
+
+std::vector<Input> parseXd(const std::string& text, MacroInfo* info, std::string* error) {
+    // Формат xdBot 1.x/2.x (.xd), по Macro::XDtoGDR: первая строка "<fps>" или "android",
+    // дальше "кадр|нажато|кнопка|игрок2|только_позиция|...". Строки с позицией пропускаются.
+    auto err = [&](const std::string& m) {
+        if (error) *error = m;
+        return std::vector<Input>{};
+    };
+    std::vector<Input> macro;
+    double mult = 1.0;
+    int skipped = 0;
+    size_t pos = 0, lineNo = 0;
+    while (pos <= text.size()) {
+        size_t e = text.find('\n', pos);
+        if (e == std::string::npos) e = text.size();
+        std::string line = text.substr(pos, e - pos);
+        pos = e + 1;
+        ++lineNo;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.empty()) continue;
+        std::vector<std::string> f;
+        size_t a = 0;
+        while (true) {
+            size_t b = line.find('|', a);
+            f.push_back(line.substr(a, b == std::string::npos ? std::string::npos : b - a));
+            if (b == std::string::npos) break;
+            a = b + 1;
+        }
+        char* endp = nullptr;
+        if (f.size() < 4) {
+            if (f[0] == "android") {
+                mult = 4.0;
+                if (info) info->fps = 60.0;
+            } else {
+                double fps = std::strtod(f[0].c_str(), &endp);
+                if (endp == f[0].c_str() || !(fps > 0)) return err(".xd line " + std::to_string(lineNo) + ": bad framerate");
+                mult = 240.0 / fps;
+                if (info) info->fps = fps;
+            }
+            continue;
+        }
+        if (f.size() < 5) return err(".xd line " + std::to_string(lineNo) + ": too few fields");
+        const double frame = std::strtod(f[0].c_str(), &endp);
+        if (endp == f[0].c_str()) return err(".xd line " + std::to_string(lineNo) + ": bad frame");
+        if (f[4] == "1") continue;  // запись позиции, не ввод
+        if (std::atoi(f[2].c_str()) != 1) {
+            ++skipped;
+            continue;
+        }
+        macro.push_back(Input{static_cast<int64_t>(std::llround(frame * mult)), f[1] == "1", f[3] == "1"});
+    }
+    finish(macro);
+    if (info) {
+        info->bot = "xdBot (.xd)";
+        info->note = "frames converted to 240 ticks per second";
+        if (skipped) info->note += "; " + std::to_string(skipped) + " non-jump inputs skipped";
+    }
+    return macro;
+}
+
 std::vector<Input> parseMacroBytes(const std::vector<uint8_t>& bytes, MacroInfo* info, std::string* error) {
+    if (bytes.empty()) {
+        if (error) *error = "empty file";
+        return {};
+    }
     if (bytes.size() >= 3 && std::memcmp(bytes.data(), "GDR", 3) == 0) return parseGdr2(bytes, info, error);
+    const uint8_t b0 = bytes[0];
+    if ((b0 >= 0x80 && b0 <= 0x8f) || b0 == 0xde || b0 == 0xdf) return parseGdr1(bytes, info, error);
     std::string text(bytes.begin(), bytes.end());
     if (text.size() >= 3 && static_cast<uint8_t>(text[0]) == 0xEF) text.erase(0, 3);  // BOM
     size_t k = text.find_first_not_of(" \t\r\n");
     if (k != std::string::npos && text[k] == '{') return parseGdrJson(text, info, error);
+    // .xd: первая строка число или "android", в следующих есть разделитель '|'.
+    if (text.find('|') != std::string::npos) return parseXd(text, info, error);
     return parseMacroText(text, error);
 }
 

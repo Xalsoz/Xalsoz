@@ -109,3 +109,46 @@ def test_gmd_file(tmp_path):
     p.write_text(f'<?xml version="1.0"?><plist><dict><k>k2</k><s>Name</s><k>k4</k><s>{enc}</s></dict></plist>')
     layout = load_layout(p)
     assert layout.start_mode == "wave" and layout.start_speed == 0.5
+
+
+GDR1_MSGPACK = bytes.fromhex(
+    "8dab67616d6556657273696f6ecb4001a8c154c985f0ab6465736372697074696f6ea0a776657273696f6ecb"
+    "3ff0000000000000a86475726174696f6ecb400c000000000000a3626f7482a46e616d65a57864426f74a776"
+    "657273696f6ea776322e332e3131a56c6576656c82a26964ce004c4b40a46e616d65a54752494546a6617574"
+    "686f72a26d65a47365656400a5636f696e7300a36c646dc2a96672616d6572617465cb406e000000000000a6"
+    "696e707574739684a56672616d6564a362746e01a23270c2a4646f776ec384a56672616d65cc82a362746e01"
+    "a23270c2a4646f776ec284a56672616d65cd012ca362746e01a23270c3a4646f776ec384a56672616d65cd01"
+    "36a362746e02a23270c2a4646f776ec384a56672616d65ce00011170a362746e01a23270c2a4646f776ec384"
+    "a56672616d65ce0001117aa362746e01a23270c2a4646f776ec2aa6672616d6546697865739182a56672616d"
+    "6505a2703182a178cb3ff8000000000000a179cb4004000000000000"
+)
+
+
+def test_gdr1_messagepack_written_by_the_msgpack_library(tmp_path):
+    p = tmp_path / "grief.gdr"
+    p.write_bytes(GDR1_MSGPACK)
+    m = load_macro(p)
+    assert (m.level_id, m.level_name, m.bot) == (5000000, "GRIEF", "xdBot")
+    assert [(i.frame, i.down, i.player2) for i in m.inputs if i.button == 1] == [
+        (100, True, False), (130, False, False), (300, True, True), (70000, True, False), (70010, False, False)
+    ]
+    ev = m.events()
+    assert len(ev) == 5  # кнопка 2 не считается прыжком
+    with pytest.raises(ValueError):
+        load_macro_bytes = tmp_path / "cut.gdr"
+        load_macro_bytes.write_bytes(GDR1_MSGPACK[:200])
+        load_macro(load_macro_bytes)
+
+
+def test_xd_file(tmp_path):
+    p = tmp_path / "m.xd"
+    p.write_text("60\n10|1|1|0|0|0\n10|0|0|0|1|1.5|2.5\n13|0|1|0|0|0\n20|1|1|1|0|0\n", encoding="utf-8")
+    m = load_macro(p)
+    assert [(i.frame, i.down, i.player2) for i in m.inputs] == [(40, True, False), (52, False, False), (80, True, True)]
+    a = tmp_path / "a.xd"
+    a.write_text("android\n5|1|1|0|0\n", encoding="utf-8")
+    assert load_macro(a).inputs[0].frame == 20
+    bad = tmp_path / "b.xd"
+    bad.write_text("60\nabc|1|1|0|0\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_macro(bad)

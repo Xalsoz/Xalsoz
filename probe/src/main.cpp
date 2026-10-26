@@ -227,15 +227,27 @@ bool loadMacroFile(Session& s, std::string& problem) {
 // Папка с макросами: сюда кладут файлы .gdr2, .gdr, .gdr.json, .json или .txt.
 std::filesystem::path macrosDir() { return saveDir() / "macros"; }
 
+// Кроме своей папки смотрим в папку макросов xdBot (соседний мод), если она есть: макросы оттуда
+// подхватываются без копирования.
+std::vector<std::filesystem::path> macroFolders() {
+    std::vector<std::filesystem::path> dirs{macrosDir()};
+    std::error_code ec;
+    auto xd = saveDir().parent_path() / "zilko.xdbot" / "macros";
+    if (std::filesystem::is_directory(xd, ec)) dirs.push_back(xd);
+    return dirs;
+}
+
 std::vector<std::filesystem::path> listMacros() {
     std::vector<std::filesystem::path> files;
     std::error_code ec;
     std::filesystem::create_directories(macrosDir(), ec);
-    for (auto const& e : std::filesystem::directory_iterator(macrosDir(), ec)) {
-        if (!e.is_regular_file(ec)) continue;
-        auto ext = e.path().extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (ext == ".gdr2" || ext == ".gdr" || ext == ".json" || ext == ".txt") files.push_back(e.path());
+    for (auto const& dir : macroFolders()) {
+        for (auto const& e : std::filesystem::directory_iterator(dir, ec)) {
+            if (!e.is_regular_file(ec)) continue;
+            auto ext = e.path().extension().string();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+            if (ext == ".gdr2" || ext == ".gdr" || ext == ".json" || ext == ".txt" || ext == ".xd") files.push_back(e.path());
+        }
     }
     std::sort(files.begin(), files.end());
     return files;
@@ -614,7 +626,7 @@ void uiStart(bool solve) {
             ok = loadMacroPath(s, files[macroIndex() < files.size() ? macroIndex() : files.size() - 1], problem);
         } else {
             ok = loadMacroFile(s, problem);  // запасной вариант: probe_input.txt
-            if (!ok) problem = "No macros found. Put .gdr2 / .gdr.json files into:\n" + macrosDir().string();
+            if (!ok) problem = "No macros found. Put .gdr2 / .gdr / .xd / .json files into:\n" + macrosDir().string();
         }
         if (!ok) {
             alert(problem);
