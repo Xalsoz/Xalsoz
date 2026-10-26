@@ -1,0 +1,27 @@
+# Сборка мода gddiff Window Probe на серверах GitHub (Windows).
+# Готовый файл .geode появляется во вкладке Actions -> последний запуск -> Artifacts.
+name: Build probe mod
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "probe/**"
+      - ".github/workflows/build-mod.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the mod
+        uses: geode-sdk/build-geode-mod@main
+        id: build
+        with:
+          path: probe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: gddiff-window-probe
+          path: ${{ steps.build.outputs.build-output }}

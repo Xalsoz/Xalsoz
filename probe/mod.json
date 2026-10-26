@@ -1,0 +1,101 @@
+{
+    "geode": "5.11.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "gddiff.window-probe",
+    "name": "gddiff Window Probe",
+    "version": "v0.1.0",
+    "developer": "gddiff",
+    "description": "Measures the timing window of every click of a macro by shifting it until the player dies",
+    "settings": {
+        "enabled": {
+            "type": "bool",
+            "name": "Probe on level start",
+            "description": "When a level opens, read probe_input.txt from the mod save folder and start measuring. Turn off for normal play.",
+            "default": false
+        },
+        "max-shift": {
+            "type": "int",
+            "name": "Max shift (ticks)",
+            "description": "How far each click is shifted in each direction. 48 ticks = 200 ms at 240 TPS.",
+            "default": 48,
+            "min": 1,
+            "max": 480
+        },
+        "horizon": {
+            "type": "int",
+            "name": "Survival horizon (ticks)",
+            "description": "How long the player must survive after a shifted click. Too short misses delayed deaths and overestimates windows.",
+            "default": 240,
+            "min": 10,
+            "max": 2400
+        },
+        "stride": {
+            "type": "int",
+            "name": "Measure every Nth click",
+            "default": 1,
+            "min": 1,
+            "max": 10000
+        },
+        "first-index": {
+            "type": "int",
+            "name": "First click index",
+            "default": 0,
+            "min": 0,
+            "max": 1000000
+        },
+        "last-index": {
+            "type": "int",
+            "name": "Last click index (-1 = all)",
+            "default": -1,
+            "min": -1,
+            "max": 1000000
+        },
+        "speed": {
+            "type": "float",
+            "name": "Speed",
+            "description": "Game speed while measuring. Higher is faster if your PC keeps up.",
+            "default": 1.0,
+            "min": 0.25,
+            "max": 100.0
+        },
+        "exact-restart": {
+            "type": "bool",
+            "name": "Exact restart",
+            "description": "Start every trial from the level start instead of a checkpoint. Exact but very slow: use with stride or a click range to check checkpoint results.",
+            "default": false
+        },
+        "checkpoint-on-release": {
+            "type": "bool",
+            "name": "Checkpoints only on released button",
+            "default": true
+        },
+        "repair-restore": {
+            "type": "bool",
+            "name": "Repair checkpoint state",
+            "description": "Restore player position, rotation and y velocity after loading a checkpoint if they differ.",
+            "default": true
+        },
+        "verify-restore": {
+            "type": "bool",
+            "name": "Verify checkpoints",
+            "description": "Replay the original click after each new checkpoint and stop if it dies.",
+            "default": true
+        },
+        "frame-source": {
+            "type": "string",
+            "name": "Tick source",
+            "description": "level-time matches xdBot macros, progress matches other bots.",
+            "default": "level-time",
+            "one-of": ["level-time", "progress"]
+        },
+        "frame-offset": {
+            "type": "int",
+            "name": "Tick offset",
+            "default": 0,
+            "min": -10,
+            "max": 10
+        }
+    }
+}
