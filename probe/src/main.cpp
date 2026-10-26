@@ -61,7 +61,7 @@ struct Fingerprint {
     PlayerPrint p2;
 };
 
-enum class Phase { None, Solving, Measuring, Replay };
+enum class Phase { None, Solving, Measuring, Replay, Probe };
 
 // Строка трассы для проверки воспроизведения: где игрок был на каждом тике.
 struct TraceRow {
@@ -76,6 +76,12 @@ struct Session {
     std::vector<probe::Input> macro;
     size_t replayIdx = 0;
     std::vector<TraceRow> trace;
+    // Автовыбор источника тика: макрос проигрывается двумя способами, выбирается тот, где игрок живёт дольше.
+    bool probeWanted = false;    // выбрать источник пробой (режим auto, макрос чужого бота)
+    bool probeDefault = false;   // источник по умолчанию (по имени бота)
+    int probeStage = 0;
+    int64_t probeAlive[2] = {0, 0};
+    bool probeSource[2] = {false, true};  // false = счётчик шагов, true = время уровня
     probe::Config config;
     probe::SolveConfig solveConfig;
     std::unique_ptr<probe::Controller> controller;
@@ -222,6 +228,7 @@ void loadSettings(Session& s) {
 // Источник номера тика. Макросы xdBot записаны по времени уровня, макросы остальных ботов по целому
 // счётчику шагов (так их и проигрывает сам xdBot). Режим auto выбирает по имени бота в файле.
 void applyFrameSource(Session& s) {
+    s.probeWanted = false;
     auto mode = Mod::get()->getSettingValue<std::string>("frame-source");
     if (mode == "progress") {
         s.levelTimeSource = false;
@@ -231,14 +238,14 @@ void applyFrameSource(Session& s) {
         std::string bot = s.macroBot;
         std::transform(bot.begin(), bot.end(), bot.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         s.levelTimeSource = bot.empty() || bot.find("xdbot") != std::string::npos;
-        if (!bot.empty()) {
-            if (!s.macroNote.empty()) s.macroNote += "; ";
-            s.macroNote += std::string("tick source: ") + (s.levelTimeSource ? "level time" : "step counter") + " (macro by " + s.macroBot + ")";
-        }
+        s.probeDefault = s.levelTimeSource;
+        // Известный xdBot: источник известен. Чужой бот: источник выбирает пробный прогон.
+        s.probeWanted = !bot.empty() && !s.levelTimeSource;
     }
 }
 
 bool loadMacroFile(Session& s, std::string& problem) {
+    s.probeWanted = false;
     std::ifstream file(inputPath());
     if (!file) {
         problem = "No probe_input.txt in the mod save folder (" + saveDir().string() + ")";
@@ -492,6 +499,68 @@ void replayTick(PlayLayer* pl) {
     while (s.replayIdx < s.macro.size() && s.macro[s.replayIdx].frame <= tick) press(pl, s.macro[s.replayIdx++]);
 }
 
+constexpr int64_t kProbeTicks = 3000;
+
+void launchAfterProbe(PlayLayer* pl) {
+    if (Mod::get()->getSettingValue<bool>("replay-test")) {
+        startReplay(pl);
+    } else {
+        startMeasure(pl);
+    }
+}
+
+void startProbeRun(PlayLayer* pl) {
+    auto& s = session();
+    s.levelTimeSource = s.probeSource[s.probeStage];
+    s.replayIdx = 0;
+    s.died = false;
+    s.lastTick = -1;
+    releaseButtons(pl);
+    pl->resetLevel();
+}
+
+void startProbe(PlayLayer* pl) {
+    auto& s = session();
+    s.phase = Phase::Probe;
+    s.probeStage = 0;
+    s.probeAlive[0] = s.probeAlive[1] = 0;
+    beginPractice(pl);
+    notify("gddiff: checking which tick source fits this macro");
+    startProbeRun(pl);
+}
+
+void finishProbeRun(PlayLayer* pl, int64_t aliveTicks) {
+    auto& s = session();
+    s.probeAlive[s.probeStage] = aliveTicks;
+    if (++s.probeStage < 2) return startProbeRun(pl);
+    // Выбор: кто прожил дольше. При ничьей остаётся источник по умолчанию (по имени бота).
+    bool chosen = s.probeDefault;
+    if (s.probeAlive[0] != s.probeAlive[1]) chosen = s.probeAlive[0] > s.probeAlive[1] ? s.probeSource[0] : s.probeSource[1];
+    s.levelTimeSource = chosen;
+    releaseButtons(pl);
+    s.phase = Phase::None;
+    auto name = [&](bool t) { return t ? "level time" : "step counter"; };
+    std::string msg = std::string("tick source: ") + name(chosen) + " (survived " + std::to_string(s.probeAlive[chosen ? 1 : 0]) +
+                      " vs " + std::to_string(s.probeAlive[chosen ? 0 : 1]) + " ticks)";
+    if (s.probeAlive[0] == s.probeAlive[1]) msg += ", both survive equally: default by macro bot";
+    log::info("gddiff probe: {}", msg);
+    notify("gddiff: " + msg, NotificationIcon::Info);
+    s.macroNote = msg;
+    launchAfterProbe(pl);
+}
+
+void probeTick(PlayLayer* pl) {
+    auto& s = session();
+    const int64_t tick = currentTick(pl);
+    const bool died = s.died;
+    s.died = false;
+    if (tick == s.lastTick && !died) return;  // полутики 2.2081: один вызов на тик
+    s.lastTick = tick;
+    if (died) return finishProbeRun(pl, tick);
+    if (pl->m_levelEndAnimationStarted || tick >= kProbeTicks) return finishProbeRun(pl, kProbeTicks);
+    while (s.replayIdx < s.macro.size() && s.macro[s.replayIdx].frame <= tick) press(pl, s.macro[s.replayIdx++]);
+}
+
 void startSolve(PlayLayer* pl) {
     auto& s = session();
     s.solver = std::make_unique<probe::Solver>(s.solveConfig);
@@ -563,6 +632,10 @@ void stopRun(PlayLayer* pl, std::string const& reason) {
         finishMeasure(pl, reason);
     } else if (s.phase == Phase::Replay) {
         finishReplay(pl, reason);
+    } else if (s.phase == Phase::Probe) {
+        releaseButtons(pl);
+        s.phase = Phase::None;
+        lastRun().lines = {"Stopped: " + reason};
     }
 }
 
@@ -681,6 +754,7 @@ void afterCommands(GJBaseGameLayer* layer) {
         return;
     }
     if (s.phase == Phase::Replay) return replayTick(pl);
+    if (s.phase == Phase::Probe) return probeTick(pl);
     if (!s.running()) return;
     int64_t tick = currentTick(pl);
     bool died = s.died;
@@ -738,6 +812,8 @@ void uiStart(bool solve) {
     resumeGame(pl);
     if (solve) {
         startSolve(pl);
+    } else if (s.probeWanted) {
+        startProbe(pl);
     } else if (Mod::get()->getSettingValue<bool>("replay-test")) {
         startReplay(pl);
     } else {
@@ -760,6 +836,9 @@ std::vector<std::string> statusLines() {
         lines.push_back(s.solver->progressText());
         if (s.solver->tickRebases() > 0)
             lines.push_back("Tick counter shifted after " + std::to_string(s.solver->tickRebases()) + " restores");
+    } else if (s.phase == Phase::Probe) {
+        lines.push_back("Checking which tick source fits this macro...");
+        lines.push_back(std::string("Trial ") + std::to_string(s.probeStage + 1) + " of 2");
     } else if (s.phase == Phase::Replay) {
         lines.push_back("Replaying the macro once, recording positions...");
         lines.push_back(std::to_string(s.trace.size()) + " ticks recorded");
