@@ -15,6 +15,7 @@ add_library(${PROJECT_NAME} SHARED
     src/core/probe_core.cpp
     src/core/solve_core.cpp
     src/core/difficulty.cpp
+    src/core/macro_io.cpp
 )
 target_include_directories(${PROJECT_NAME} PRIVATE src)
 

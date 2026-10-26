@@ -11,3 +11,6 @@ ${CXX:-g++} -std=c++20 -O2 -Wall -Wextra -Werror -I src -o "$out2" tests/test_so
 out3="${TMPDIR:-/tmp}/gddiff_difficulty_tests"
 ${CXX:-g++} -std=c++20 -O2 -Wall -Wextra -Werror -I src -o "$out3" tests/test_difficulty.cpp src/core/difficulty.cpp
 "$out3"
+out4="${TMPDIR:-/tmp}/gddiff_macro_io_tests"
+${CXX:-g++} -std=c++20 -O2 -Wall -Wextra -Werror -I src -o "$out4" tests/test_macro_io.cpp src/core/macro_io.cpp src/core/probe_core.cpp src/core/solve_core.cpp
+"$out4"

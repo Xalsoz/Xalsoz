@@ -24,9 +24,11 @@
 #include <Geode/ui/Popup.hpp>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <memory>
 #include <sstream>
@@ -34,6 +36,7 @@
 #include <vector>
 
 #include "core/difficulty.hpp"
+#include "core/macro_io.hpp"
 #include "core/probe_core.hpp"
 #include "core/solve_core.hpp"
 
@@ -80,6 +83,8 @@ struct Session {
     double sigmaMs = 10.0;
     int levelID = 0;
     std::string levelName;
+    std::string macroName;
+    std::string macroNote;
     int64_t notifiedAt = 0;
     int64_t repairs = 0;
     std::vector<Fingerprint> prints;  // по одному на каждый чекпоинт мода (стек)
@@ -216,6 +221,47 @@ bool loadMacroFile(Session& s, std::string& problem) {
         problem = "Bad probe_input.txt " + error;
         return false;
     }
+    return true;
+}
+
+// Папка с макросами: сюда кладут файлы .gdr2, .gdr, .gdr.json, .json или .txt.
+std::filesystem::path macrosDir() { return saveDir() / "macros"; }
+
+std::vector<std::filesystem::path> listMacros() {
+    std::vector<std::filesystem::path> files;
+    std::error_code ec;
+    std::filesystem::create_directories(macrosDir(), ec);
+    for (auto const& e : std::filesystem::directory_iterator(macrosDir(), ec)) {
+        if (!e.is_regular_file(ec)) continue;
+        auto ext = e.path().extension().string();
+        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (ext == ".gdr2" || ext == ".gdr" || ext == ".json" || ext == ".txt") files.push_back(e.path());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+size_t& macroIndex() {
+    static size_t i = 0;
+    return i;
+}
+
+bool loadMacroPath(Session& s, std::filesystem::path const& path, std::string& problem) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        problem = "Cannot open " + path.string();
+        return false;
+    }
+    std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    probe::MacroInfo info;
+    std::string error;
+    s.macro = probe::parseMacroBytes(bytes, &info, &error);
+    if (!error.empty() || s.macro.empty()) {
+        problem = path.filename().string() + ": " + (error.empty() ? std::string("no clicks found") : error);
+        return false;
+    }
+    s.macroNote = info.note;
+    s.macroName = path.filename().string();
     return true;
 }
 
@@ -562,10 +608,19 @@ void uiStart(bool solve) {
     s.levelName = pl->m_level->m_levelName;
     if (!solve) {
         std::string problem;
-        if (!loadMacroFile(s, problem)) {
+        auto files = listMacros();
+        bool ok = false;
+        if (!files.empty()) {
+            ok = loadMacroPath(s, files[std::min(macroIndex(), files.size() - 1)], problem);
+        } else {
+            ok = loadMacroFile(s, problem);  // запасной вариант: probe_input.txt
+            if (!ok) problem = "No macros found. Put .gdr2 / .gdr.json files into:\n" + macrosDir().string();
+        }
+        if (!ok) {
             alert(problem);
             return;
         }
+        if (!s.macroNote.empty()) notify("gddiff: " + s.macroNote, NotificationIcon::Warning);
     }
     resumeGame(pl);
     if (solve) {
@@ -605,6 +660,7 @@ std::vector<std::string> statusLines() {
 class GddiffPopup : public geode::Popup {
 protected:
     std::vector<CCLabelBMFont*> m_lines;
+    CCLabelBMFont* m_macroLabel = nullptr;
 
     bool init() {
         if (!Popup::init(400.f, 280.f)) return false;
@@ -624,10 +680,25 @@ protected:
         addButton("Measure macro", 200.f, menu_selector(GddiffPopup::onMeasure));
         addButton("Stop", 328.f, menu_selector(GddiffPopup::onStopRun));
 
-        for (int i = 0; i < 11; ++i) {
+        auto small = [&](char const* text, float x, SEL_MenuHandler handler, int width) {
+            auto spr = ButtonSprite::create(text, width, true, "bigFont.fnt", "GJ_button_04.png", 24.f, .4f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this, handler);
+            btn->setPosition({x, 198.f});
+            menu->addChild(btn);
+        };
+        small("<", 28.f, menu_selector(GddiffPopup::onPrevMacro), 22);
+        small(">", 56.f, menu_selector(GddiffPopup::onNextMacro), 22);
+        small("Open macros folder", 330.f, menu_selector(GddiffPopup::onOpenFolder), 120);
+        m_macroLabel = CCLabelBMFont::create("", "chatFont.fnt");
+        m_macroLabel->setAnchorPoint({0.f, 0.5f});
+        m_macroLabel->setPosition({76.f, 198.f});
+        m_macroLabel->setScale(.6f);
+        m_mainLayer->addChild(m_macroLabel);
+
+        for (int i = 0; i < 10; ++i) {
             auto label = CCLabelBMFont::create("", "chatFont.fnt");
             label->setAnchorPoint({0.f, 0.5f});
-            label->setPosition({16.f, 195.f - i * 16.f});
+            label->setPosition({16.f, 172.f - i * 16.f});
             label->setScale(.62f);
             m_mainLayer->addChild(label);
             m_lines.push_back(label);
@@ -638,6 +709,13 @@ protected:
     }
 
     void refresh(float) {
+        auto files = listMacros();
+        if (!files.empty() && macroIndex() >= files.size()) macroIndex() = 0;
+        std::string name = files.empty() ? std::string("no macros: put files into the macros folder")
+                                         : std::to_string(macroIndex() + 1) + "/" + std::to_string(files.size()) + "  " +
+                                               files[macroIndex()].filename().string();
+        if (name.size() > 44) name = name.substr(0, 41) + "...";
+        m_macroLabel->setString(name.c_str());
         auto lines = statusLines();
         for (size_t i = 0; i < m_lines.size(); ++i) {
             std::string text = i < lines.size() ? lines[i] : std::string();
@@ -653,6 +731,21 @@ protected:
     void onMeasure(CCObject*) {
         this->onClose(nullptr);
         uiStart(false);
+    }
+    void onPrevMacro(CCObject*) {
+        auto n = listMacros().size();
+        if (n) macroIndex() = (macroIndex() + n - 1) % n;
+        this->refresh(0.f);
+    }
+    void onNextMacro(CCObject*) {
+        auto n = listMacros().size();
+        if (n) macroIndex() = (macroIndex() + 1) % n;
+        this->refresh(0.f);
+    }
+    void onOpenFolder(CCObject*) {
+        std::error_code ec;
+        std::filesystem::create_directories(macrosDir(), ec);
+        geode::utils::file::openFolder(macrosDir());
     }
     void onStopRun(CCObject*) {
         uiStop();
