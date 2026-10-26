@@ -37,10 +37,42 @@ def test_plaintext_macro():
     assert [(i.frame, i.down, i.player2) for i in m.inputs] == [(10, True, False), (15, True, True), (20, False, False)]
 
 
-def test_binary_gdr_is_rejected(tmp_path):
-    p = tmp_path / "x.gdr"
-    p.write_bytes(b"GDR\x02\x00\x01")
-    with pytest.raises(ValueError, match="бинарный"):
+# Файл записан настоящей библиотекой maxnut/GDReplayFormat (gdr.hpp) с расширениями xdBot-типа:
+# уровень GRIEF (id 5000000), два игрока, расширение на каждом входе, смерти, большие кадры.
+GDR2_FROM_LIBRARY = bytes.fromhex(
+    "474452020c50687973696373496e707574026d65016441480000c1ac01406e0000000000008906020000057864426f7403c096b10205475249454608b9600568656c6c6f026496010a0801100000000040000000400a0000000000000a1040f0000040000000400a000000000000cf041043e1000040000000400a0000000000000a1043e4c00040000000400a000000000000ffc0081047cd140040000000400a000000000000141047cd1b8040000000400a000000000000031047cd1c4040000000400a000000000000d2071047ce8b0040000000400a00000000000051104270000040000000400a00000000000064104307000040000000400a000000000000"
+)
+
+
+def test_gdr2_written_by_the_real_library(tmp_path):
+    p = tmp_path / "x.gdr2"
+    p.write_bytes(GDR2_FROM_LIBRARY)
+    m = load_macro(p)
+    assert (m.level_id, m.level_name, m.bot, m.fps) == (5000000, "GRIEF", "xdBot", 240.0)
+    got = [(i.frame, i.down, i.player2) for i in m.inputs]
+    assert got == [
+        (0, True, False), (5, False, False), (40, True, True), (90, False, True),
+        (300, True, False), (305, False, False), (70000, True, False),
+        (70010, False, False), (70011, True, False), (70500, False, False),
+    ]
+
+
+def test_gdr2_roundtrip_and_errors(tmp_path):
+    from gddiff.io.macro import Input, Macro, to_gdr2
+
+    m = Macro(inputs=[Input(3, True), Input(9, False), Input(5, True, True), Input(200000, True)], fps=240.0)
+    for tag in ("", "PhysicsInput"):
+        p = tmp_path / "y.gdr2"
+        p.write_bytes(to_gdr2(m, tag=tag))
+        back = load_macro(p)
+        assert [(i.frame, i.down, i.player2) for i in back.inputs] == [
+            (3, True, False), (5, True, True), (9, False, False), (200000, True, False)
+        ]
+    p.write_bytes(to_gdr2(m)[:20])
+    with pytest.raises(ValueError, match="оборван"):
+        load_macro(p)
+    p.write_bytes(b"GDR\x01\x00")
+    with pytest.raises(ValueError, match="версия"):
         load_macro(p)
 
 

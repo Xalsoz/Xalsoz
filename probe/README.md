@@ -57,7 +57,7 @@ geode build
 
 ## Использование
 
-1. `python -m gddiff probe-prepare --macro my.gdr.json --out probe_input.txt`
+1. `python -m gddiff probe-prepare --macro my.gdr2 --out probe_input.txt`
 2. Положи `probe_input.txt` в папку сохранений мода. На Windows это
    `%LOCALAPPDATA%\GeometryDash\geode\mods\gddiff.window-probe` (папку можно
    создать вручную, если мод ещё ничего туда не писал).

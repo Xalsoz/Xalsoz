@@ -2,15 +2,16 @@
 
 Поддерживаются:
 - GDR JSON (.gdr.json, .json): экспорт xdBot, MH Replay и других ботов формата GDR;
+- бинарный GDR 2 (.gdr2, файл начинается с байтов "GDR"): формат maxnut/GDReplayFormat,
+  разбор по его заголовкам gdr.hpp и binarystream.hpp (платформерные макросы не читаются);
 - текстовый формат: строки "<кадр> <1|0> [<игрок 2: 1|0>]" и необязательная строка "fps=240".
-
-Бинарный GDR (файл начинается с байтов "GDR") пока не читается: его нужно
-выгрузить в JSON тем же ботом.
 """
 
 from __future__ import annotations
 
 import json
+import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -113,11 +114,153 @@ def parse_plaintext(text: str, source: str | None = None) -> Macro:
     return Macro(inputs=inputs, fps=fps, source=source)
 
 
+class _Reader:
+    """Чтение по правилам binarystream.hpp: varint (LEB128), строки с длиной-префиксом,
+    float и double в порядке байт от старшего к младшему."""
+
+    def __init__(self, data: bytes, name: str):
+        self.data = data
+        self.pos = 0
+        self.name = name
+
+    def left(self) -> int:
+        return len(self.data) - self.pos
+
+    def _need(self, n: int) -> None:
+        if n < 0 or self.left() < n:
+            raise ValueError(f"{self.name}: файл GDR оборван или повреждён (позиция {self.pos})")
+
+    def varint(self) -> int:
+        result = 0
+        for i in range(10):
+            self._need(1)
+            b = self.data[self.pos]
+            self.pos += 1
+            result |= (b & 0x7F) << (7 * i)
+            if not b & 0x80:
+                return result
+        raise ValueError(f"{self.name}: слишком длинное число в файле GDR (позиция {self.pos})")
+
+    def string(self) -> str:
+        n = self.varint()
+        self._need(n)
+        raw = self.data[self.pos : self.pos + n]
+        self.pos += n
+        return raw.decode("utf-8", errors="replace")
+
+    def floating(self, size: int) -> float:
+        self._need(size)
+        raw = self.data[self.pos : self.pos + size]
+        self.pos += size
+        return struct.unpack(">f" if size == 4 else ">d", raw)[0]
+
+    def skip(self, n: int) -> None:
+        self._need(n)
+        self.pos += n
+
+
+def parse_gdr2(raw: bytes, source: str | None = None) -> Macro:
+    """Бинарный GDR 2 (.gdr2). Расширения ботов (позиции, скорости) пропускаются."""
+    name = source or "макрос"
+    if raw[:3] != b"GDR":
+        raise ValueError(f"{name}: нет заголовка GDR")
+    r = _Reader(raw, name)
+    r.pos = 3
+    version = r.varint()
+    if version != 2:
+        raise ValueError(f"{name}: версия формата GDR {version}, читается только 2")
+    input_tag = r.string()
+    r.string()  # автор
+    r.string()  # описание
+    r.floating(4)  # длительность
+    r.varint()  # версия игры
+    fps = r.floating(8)
+    r.varint()  # seed
+    r.varint()  # монеты
+    r.varint()  # ldm
+    platformer = bool(r.varint())
+    bot_name = r.string()
+    r.varint()  # версия бота
+    level_id = r.varint()
+    level_name = r.string()
+    if platformer:
+        raise ValueError(f"{name}: макрос для платформера, такие не поддерживаются")
+    r.skip(r.varint())  # расширение всего макроса
+
+    n_deaths = r.varint()
+    for _ in range(n_deaths):
+        r.varint()
+
+    r.varint()  # число входов всего (читаем по концу файла, как в игре)
+    p1_left = r.varint()
+    inputs: list[Input] = []
+    player2 = p1_left == 0
+    prev = 0
+    while r.left() > 0:
+        packed = r.varint()
+        frame = prev + (packed >> 1)
+        inputs.append(Input(frame=frame, down=bool(packed & 1), player2=player2))
+        prev = frame
+        if input_tag:
+            r.skip(r.varint())  # расширение входа
+        if p1_left > 0:
+            p1_left -= 1
+            if p1_left == 0:
+                prev = 0
+                player2 = True
+    inputs.sort(key=lambda i: (i.frame, i.player2))
+    return Macro(
+        inputs=inputs,
+        fps=float(fps) if fps and math.isfinite(fps) else float(TPS),
+        level_id=level_id or None,
+        level_name=level_name or None,
+        bot=bot_name or None,
+        source=source,
+    )
+
+
+def to_gdr2(macro: Macro, author: str = "", tag: str = "") -> bytes:
+    """Запись в GDR 2 без расширений. Нужна для тестов; игра и боты такой файл читают."""
+
+    def vi(n: int) -> bytes:
+        out = bytearray()
+        while True:
+            b = n & 0x7F
+            n >>= 7
+            out.append(b | (0x80 if n else 0))
+            if not n:
+                return bytes(out)
+
+    def st(t: str) -> bytes:
+        b = t.encode("utf-8")
+        return vi(len(b)) + b
+
+    ins = sorted(macro.inputs, key=lambda i: (i.frame, i.player2))
+    p1 = [i for i in ins if not i.player2]
+    p2 = [i for i in ins if i.player2]
+    out = bytearray(b"GDR")
+    out += vi(2) + st(tag) + st(author) + st("")
+    out += struct.pack(">f", 0.0) + vi(22081) + struct.pack(">d", macro.fps)
+    out += vi(0) + vi(0) + vi(0) + vi(0)
+    out += st(macro.bot or "gddiff") + vi(1) + vi(macro.level_id or 0) + st(macro.level_name or "")
+    out += vi(0)  # расширение макроса
+    out += vi(0)  # смерти
+    out += vi(len(ins)) + vi(len(p1))
+    for group in (p1, p2):
+        prev = 0
+        for i in group:
+            out += vi(((i.frame - prev) << 1) | int(i.down))
+            if tag:
+                out += vi(0)
+            prev = i.frame
+    return bytes(out)
+
+
 def load_macro(path: str | Path) -> Macro:
     path = Path(path)
     raw = path.read_bytes()
-    if raw.lstrip()[:3] == b"GDR":
-        raise ValueError(f"{path.name}: бинарный GDR пока не поддерживается, выгрузи макрос в JSON (.gdr.json)")
+    if raw[:3] == b"GDR":
+        return parse_gdr2(raw, str(path))
     text = raw.decode("utf-8-sig")
     if text.lstrip().startswith("{"):
         return parse_gdr_json(json.loads(text), str(path))
