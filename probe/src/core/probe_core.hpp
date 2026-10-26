@@ -75,6 +75,9 @@ struct TickOutput {
     std::vector<Input> press;  // нажать или отпустить сейчас, в этом порядке
     Command command = Command::None;
     std::string message;
+    // Только для Solver (автопрохождение): стек чекпоинтов.
+    int popCheckpoints = 0;         // сначала удалить столько последних чекпоинтов
+    int dropOldestCheckpoints = 0;  // после команды удалить столько самых старых
 };
 
 class Controller {

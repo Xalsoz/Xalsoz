@@ -77,6 +77,38 @@ def test_cpp_core_output_is_read_correctly(tmp_path):
     assert np.array_equal(df["window_ticks"].to_numpy(), exp_early + exp_late + 1)
 
 
+@pytest.mark.skipif(shutil.which("g++") is None, reason="нужен g++")
+def test_cpp_solver_macro_is_read_by_python(tmp_path):
+    from gddiff.io.macro import load_macro
+
+    exe = tmp_path / "emit_solved"
+    subprocess.run(
+        ["g++", "-std=c++20", "-O1", "-I", "src", "-I", "tests", "-o", str(exe), "tests/emit_solved.cpp",
+         "src/core/solve_core.cpp", "src/core/probe_core.cpp"],
+        cwd=PROBE_DIR,
+        check=True,
+    )
+    res = subprocess.run([str(exe), str(tmp_path), "4", "30"], capture_output=True, text=True, check=True)
+    expected = [tuple(int(x) for x in line.split()) for line in res.stdout.splitlines()]
+    assert len(expected) == 30
+    for name in ("solved.gdr.json", "solved.txt"):
+        m = load_macro(tmp_path / name)
+        assert [(i.frame, int(i.down)) for i in m.inputs] == expected
+        assert m.fps == 240.0
+    assert load_macro(tmp_path / "solved.gdr.json").level_id == 123
+    # Найденный макрос годится для замера: probe-prepare принимает его без предупреждений.
+    text, warnings = probe_input_text(load_macro(tmp_path / "solved.gdr.json"))
+    assert not warnings
+
+
+def test_cpp_difficulty_matches_python_numbers():
+    # Те же числа зашиты в probe/tests/test_difficulty.cpp (проверка C++ против Python).
+    assert abs(float(hit_probability([20.8], 60, 10)[0]) - 0.6500801776185636) < 1e-12
+    rows = {r["hz"]: r for r in level_summary([20.8, 4.17, 50.0, 12.5], [60.0, 144.0, 240.0, float("inf")], 10)}
+    assert abs(rows["60"]["difficulty_nats"] - 3.2218568669572347) < 1e-12
+    assert abs(rows["inf"]["difficulty_nats"] - 2.92686041580521) < 1e-12
+
+
 def test_hit_probability_limits():
     w = np.array([2.0, 8.0, 30.0, 120.0])
     sigma = 8.0

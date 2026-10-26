@@ -5,15 +5,67 @@
     },
     "id": "gddiff.window-probe",
     "name": "gddiff Window Probe",
-    "version": "v0.1.0",
+    "version": "v0.2.0",
     "developer": "gddiff",
-    "description": "Measures the timing window of every click of a macro by shifting it until the player dies",
+    "description": "Finds the timing window of every click of a Geometry Dash level: plays the level itself (or takes a macro), shifts each click until the player dies, and shows the difficulty",
     "settings": {
         "enabled": {
             "type": "bool",
-            "name": "Probe on level start",
-            "description": "When a level opens, read probe_input.txt from the mod save folder and start measuring. Turn off for normal play.",
+            "name": "Measure probe_input.txt on level start",
+            "description": "When a level opens, read probe_input.txt from the mod save folder and start measuring. Turn off for normal play. The pause menu button works without this.",
             "default": false
+        },
+        "solve-horizon": {
+            "type": "int",
+            "name": "Solver look-ahead (ticks)",
+            "description": "How far ahead the solver looks after a trial click. 180 ticks = 0.75 s.",
+            "default": 180,
+            "min": 20,
+            "max": 1200
+        },
+        "solve-max-delay": {
+            "type": "int",
+            "name": "Solver click search range (ticks)",
+            "description": "How far ahead of the next obstacle the solver tries clicks.",
+            "default": 60,
+            "min": 4,
+            "max": 240
+        },
+        "solve-stride": {
+            "type": "int",
+            "name": "Solver coarse step (ticks)",
+            "description": "Tries every Nth tick first, then refines around the ones that work. 1 = slowest and most exact.",
+            "default": 2,
+            "min": 1,
+            "max": 8
+        },
+        "solve-slack": {
+            "type": "int",
+            "name": "Solver window tolerance (ticks)",
+            "default": 4,
+            "min": 0,
+            "max": 30
+        },
+        "solve-max-checkpoints": {
+            "type": "int",
+            "name": "Solver checkpoints kept",
+            "description": "How many checkpoints the solver may keep to step back when it hits a dead end.",
+            "default": 24,
+            "min": 2,
+            "max": 200
+        },
+        "measure-after-solve": {
+            "type": "bool",
+            "name": "Measure windows after solving",
+            "default": true
+        },
+        "sigma-ms": {
+            "type": "float",
+            "name": "Player aim spread (ms)",
+            "description": "Assumed spread of the player's clicks when computing difficulty. Only scales the numbers.",
+            "default": 10.0,
+            "min": 1.0,
+            "max": 50.0
         },
         "max-shift": {
             "type": "int",
@@ -88,7 +140,10 @@
             "name": "Tick source",
             "description": "level-time matches xdBot macros, progress matches other bots.",
             "default": "level-time",
-            "one-of": ["level-time", "progress"]
+            "one-of": [
+                "level-time",
+                "progress"
+            ]
         },
         "frame-offset": {
             "type": "int",
