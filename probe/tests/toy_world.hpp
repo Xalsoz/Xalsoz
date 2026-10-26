@@ -39,6 +39,7 @@ struct Req {
 struct World {
     std::vector<Req> reqs;
     int64_t endFrame = 0;
+    bool cube = false;  // отпускание безвредно и ничего не меняет, считаются только нажатия
 };
 
 struct State {
@@ -68,6 +69,7 @@ struct Sim {
     void press(const Input& in) {
         if (in.down == s.held) return;  // лишнее нажатие ничего не меняет
         s.held = in.down;
+        if (w.cube && !in.down) return;  // у куба отпускание безвредно
         if (s.k >= w.reqs.size()) return;
         const Req& r = w.reqs[s.k];
         const int64_t f = in.frame;

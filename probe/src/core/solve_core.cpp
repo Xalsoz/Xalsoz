@@ -1,6 +1,7 @@
 #include "solve_core.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <limits>
 #include <ostream>
 #include <sstream>
@@ -156,9 +157,10 @@ TickOutput Solver::onBaseline(bool died, bool ended, int64_t frame) {
     Node& n = top();
     n.scanned = true;
     n.tNone = frame;
-    if (n.tNone - n.t0 - 1 > m_cfg.maxDelay) {
+    if (!n.held && n.tNone - n.t0 - 1 > m_cfg.maxDelay) {
         // Препятствие далеко: сначала идём без клика, пока до него не останется maxDelay тиков.
         // Нужное состояние берём откатом к чекпоинту и проигрыванием до этого тика.
+        // (При удержании кнопки не ждём: отпустить её обычно надо вскоре.)
         n.scanned = false;
         Run r;
         r.purpose = Purpose::Commit;
@@ -167,7 +169,7 @@ TickOutput Solver::onBaseline(bool died, bool ended, int64_t frame) {
         r.limit = r.target;
         return beginRun(r);
     }
-    n.dMax = static_cast<int>(n.tNone - n.t0 - 1);
+    n.dMax = static_cast<int>(std::min<int64_t>(m_cfg.maxDelay, n.tNone - n.t0 - 1));
     if (n.dMax < 1) return chooseNext();  // умрёт раньше, чем успеем что-то нажать: тупик
     n.T.assign(static_cast<size_t>(n.dMax) + 1, kUnset);
     n.pending.clear();
@@ -228,33 +230,44 @@ TickOutput Solver::continueScan() {
 void Solver::finalizeOptions(Node& n) {
     n.options.clear();
     n.nextOption = 0;
-    auto improving = [&](int d) {
-        return n.T[static_cast<size_t>(d)] != kUnset && n.T[static_cast<size_t>(d)] > n.tNone + m_cfg.slack;
-    };
+    // Что считать подходящим кликом. Нажатие должно улучшать исход: игрок доживает дольше, чем
+    // если ничего не делать. Отпускание часто ничего не меняет (у куба до следующего шипа
+    // живёшь одинаково), но без него не нажать снова; поэтому у отпускания годятся все
+    // клики, не ухудшающие исход.
+    auto good = [&](int64_t t) { return n.held ? t >= n.tNone - m_cfg.slack : t > n.tNone + m_cfg.slack; };
+    std::vector<std::pair<int, int64_t>> ev;  // измеренные (d, T) по возрастанию d
+    for (int d = 1; d <= n.dMax; ++d)
+        if (n.T[static_cast<size_t>(d)] != kUnset) ev.emplace_back(d, n.T[static_cast<size_t>(d)]);
+    const int link = m_cfg.scanStride;  // соседние измеренные d склеиваем, если между ними не больше шага
     std::vector<Option> primary;
-    int d = 1;
-    while (d <= n.dMax) {
-        if (!improving(d)) {
-            ++d;
+    size_t i = 0;
+    while (i < ev.size()) {
+        if (!good(ev[i].second)) {
+            ++i;
             continue;
         }
-        int end = d;
-        while (end + 1 <= n.dMax && improving(end + 1)) ++end;
+        // Серия: подряд идущие подходящие d, у которых тик смерти меняется не больше чем на slack
+        // между соседями. Разные «площадки» (например, ловушка и честный путь) остаются разными сериями.
+        size_t end = i;
+        while (end + 1 < ev.size() && good(ev[end + 1].second) && ev[end + 1].first - ev[end].first <= link &&
+               std::llabs(ev[end + 1].second - ev[end].second) <= std::max<int64_t>(m_cfg.slack, 0) &&
+               !(ev[end].second == kInf) == !(ev[end + 1].second == kInf))
+            ++end;
         int64_t best = 0;
-        for (int k = d; k <= end; ++k) best = std::max(best, n.T[static_cast<size_t>(k)]);
-        // Самый широкий отрезок внутри компоненты, где смерть наступает не раньше best - slack.
+        for (size_t k = i; k <= end; ++k) best = std::max(best, ev[k].second);
+        // Самый широкий отрезок серии, где смерть наступает не раньше best - slack.
         int bestLo = -1, bestHi = -1;
-        int k = d;
+        size_t k = i;
         while (k <= end) {
-            if (n.T[static_cast<size_t>(k)] < best - m_cfg.slack) {
+            if (ev[k].second < best - m_cfg.slack) {
                 ++k;
                 continue;
             }
-            int j = k;
-            while (j + 1 <= end && n.T[static_cast<size_t>(j + 1)] >= best - m_cfg.slack) ++j;
-            if (bestLo < 0 || j - k > bestHi - bestLo) {
-                bestLo = k;
-                bestHi = j;
+            size_t j = k;
+            while (j + 1 <= end && ev[j + 1].second >= best - m_cfg.slack && ev[j + 1].first - ev[j].first <= link) ++j;
+            if (bestLo < 0 || ev[j].first - ev[k].first > bestHi - bestLo) {
+                bestLo = ev[k].first;
+                bestHi = ev[j].first;
             }
             k = j + 1;
         }
@@ -263,21 +276,43 @@ void Solver::finalizeOptions(Node& n) {
             o.lo = n.t0 + bestLo;
             o.hi = n.t0 + bestHi;
             o.width = bestHi - bestLo + 1;
-            o.tick = n.t0 + (bestLo + bestHi) / 2;
+            // Нажатие в середину окна (так прощает больше всего). Отпускание в широком окне: вскоре
+            // после начала, чтобы не держать кнопку без нужды.
+            o.tick = n.held ? o.lo + std::min<int64_t>((o.width - 1) / 2, 6) : n.t0 + (bestLo + bestHi) / 2;
             o.score = best;
             primary.push_back(o);
         }
-        d = end + 1;
+        i = end + 1;
     }
     std::stable_sort(primary.begin(), primary.end(), [](const Option& a, const Option& b) {
         if (a.score != b.score) return a.score > b.score;
         return a.width > b.width;
     });
+    if (n.held) {
+        // Отпускание, не меняющее исход, равноценно в любой точке: оставляем самый широкий из таких
+        // вариантов одним и в самом конце. Иначе в безвыходной позиции перебирались бы все сочетания.
+        std::vector<Option> improving;
+        const Option* widest = nullptr;
+        for (const Option& o : primary) {
+            if (o.score > n.tNone + m_cfg.slack) {
+                improving.push_back(o);
+            } else if (!widest || o.width > widest->width) {
+                widest = &o;
+            }
+        }
+        primary = improving;
+        if (widest) primary.push_back(*widest);
+    }
     n.options = primary;
+#ifdef GDDIFF_DEBUG
+    std::fprintf(stderr, "node t0=%lld held=%d tNone=%lld dMax=%d options:", (long long)n.t0, (int)n.held, (long long)n.tNone, n.dMax);
+    for (auto& o : primary) std::fprintf(stderr, " [tick %lld w=%d score=%lld]", (long long)o.tick, o.width, (long long)o.score);
+    std::fprintf(stderr, "\n");
+#endif
     // Запасные точки внутри самых широких окон: на случай, если середина ведёт в тупик.
-    for (size_t i = 0; i < primary.size() && i < 3; ++i) {
-        const Option& o = primary[i];
-        if (o.width < 6) continue;
+    for (size_t q = 0; q < primary.size() && q < 3; ++q) {
+        const Option& o = primary[q];
+        if (o.width < 6 || (n.held && o.score <= n.tNone + m_cfg.slack)) continue;
         for (int64_t t : {o.lo + o.width / 4, o.hi - o.width / 4}) {
             if (t == o.tick) continue;
             Option x = o;
@@ -302,7 +337,23 @@ TickOutput Solver::chooseNext() {
             return abort("No route found: stuck near tick " + std::to_string(m_reached) + ". " + progressText());
         }
         Node& n = top();
+#ifdef GDDIFF_DEBUG
+        std::fprintf(stderr, "choose: top t0=%lld held=%d opt=%zu/%zu waited=%d tNone=%lld dMax=%d scanned=%d\n", (long long)n.t0, (int)n.held, n.nextOption, n.options.size(), (int)n.waited, (long long)n.tNone, n.dMax, (int)n.scanned);
+#endif
         if (n.nextOption >= n.options.size()) {
+            if (n.held && n.scanned && !n.waited && n.tNone - n.t0 - 1 > n.dMax) {
+                // Кнопку надо держать дольше (корабль, волна): отпускание сейчас не помогает.
+                // Идём вперёд с зажатой кнопкой и решаем заново.
+                n.waited = true;
+                m_script.resize(n.scriptLen);  // отбросить клик прошлого варианта
+                m_widths.resize(n.scriptLen);
+                Run w;
+                w.purpose = Purpose::Commit;
+                w.waitOnly = true;
+                w.target = n.t0 + std::max(1, m_cfg.maxDelay / 2);
+                w.limit = w.target;
+                return beginRun(w);
+            }
             if (++m_backtracks > m_cfg.maxBacktracks) return abort("Backtrack budget exhausted. " + progressText());
             popTopNode();
             continue;

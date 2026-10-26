@@ -615,7 +615,7 @@ protected:
         m_mainLayer->addChild(menu);
 
         auto addButton = [&](char const* text, float x, SEL_MenuHandler handler) {
-            auto spr = ButtonSprite::create(text, 120, true, "bigFont.fnt", "GJ_button_01.png", 30.f, .5f);
+            auto spr = ButtonSprite::create(text, 100, true, "bigFont.fnt", "GJ_button_01.png", 30.f, .45f);
             auto btn = CCMenuItemSpriteExtra::create(spr, this, handler);
             btn->setPosition({x, 232.f});
             menu->addChild(btn);

@@ -99,6 +99,7 @@ private:
         std::vector<int> pending;
         size_t pendingPos = 0;
         bool refining = false;
+        bool waited = false;      // удерживаемая кнопка: уже пробовали просто подождать
         std::vector<Option> options;
         size_t nextOption = 0;
     };
